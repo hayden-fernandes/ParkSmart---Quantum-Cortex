@@ -5,9 +5,11 @@ ParkSmart is an intelligent parking management application designed to help driv
 
  Team Members
 - [Hayden Fernandes](https://github.com/haydenfernandes31)
-- [Teammate 2](https://github.com/username2)
-- [Teammate 3](https://github.com/username3)
-- [Teammate 4](https://github.com/username4)
+- [Alister Pereira](https://github.com/Alister82)
+- [Mayuresh Naik](https://github.com/MayureshNaik111)
+- [Basil Shaikh](https://github.com/username4)
+- [Neha Jamakala](https://github.com/NehaSky)
+- [Jiya Haldankar](https://github.com/jiya-haldankar77)
 
 Tech Stack
 TBD
