@@ -1,2 +1,503 @@
-git clone https://github.com/your-username/parksmart.git
-cd parksmart
+import React, { useEffect, useMemo, useState } from "react";
+
+/**
+ * ParkSmart – Quantum Cortex (Frontend)
+ * Single-file React app meant for quick drop-in preview. Uses Tailwind classes.
+ *
+ * How to use in a real project:
+ * - Create a Vite + React + TS project (or CRA). Paste this file as App.jsx/tsx.
+ * - Ensure Tailwind is enabled (or remove classes if not using Tailwind).
+ * - Set API_BASE below to your backend base URL.
+ *   Example: http://localhost:5000/api or https://your-domain/api
+ *
+ * Minimal expected backend endpoints (customize as needed):
+ *  POST   /auth/register        { name, email, password }
+ *  POST   /auth/login           { email, password } -> { token }
+ *  GET    /users/me             Authorization: Bearer <token>
+ *  GET    /lots                 -> list of parking lots
+ *  GET    /lots/:id/slots       -> availability for a lot
+ *  POST   /bookings             { lotId, slotId, from, to } (auth)
+ *  GET    /bookings/me          (auth)
+ *  POST   /payments/create      { bookingId } (auth) -> paymentIntent / order id
+ *
+ * If your backend uses different routes/fields, update the Api client below.
+ */
+
+const API_BASE = import.meta?.env?.VITE_API_BASE || "http://localhost:5000/api";
+
+// ---- Utility: super-light fetch wrapper ----
+const api = async (path, { method = "GET", body, token } = {}) => {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || res.statusText);
+  }
+  // Try JSON, fallback to text
+  const ct = res.headers.get("content-type") || "";
+  return ct.includes("application/json") ? res.json() : res.text();
+};
+
+// ---- Auth Store ----
+const useAuth = () => {
+  const [token, setToken] = useState(() => localStorage.getItem("ps_token") || "");
+  const [user, setUser] = useState(null);
+
+  const login = async (email, password) => {
+    const data = await api("/auth/login", { method: "POST", body: { email, password } });
+    const t = data.token || data.accessToken || data.jwt;
+    if (!t) throw new Error("Token not found in response");
+    localStorage.setItem("ps_token", t);
+    setToken(t);
+  };
+
+  const register = async (name, email, password) => {
+    await api("/auth/register", { method: "POST", body: { name, email, password } });
+  };
+
+  const logout = () => {
+    localStorage.removeItem("ps_token");
+    setToken("");
+    setUser(null);
+  };
+
+  const refreshMe = async () => {
+    if (!token) return;
+    try {
+      const me = await api("/users/me", { token });
+      setUser(me);
+    } catch (e) {
+      // Token invalid -> logout silently
+      console.warn("/users/me failed", e);
+      logout();
+    }
+  };
+
+  useEffect(() => { refreshMe(); }, [token]);
+
+  return { token, user, login, register, logout };
+};
+
+// ---- Simple Router ----
+const routes = ["discover", "lot", "bookings", "login", "register", "admin"];
+function useRoute() {
+  const [route, setRoute] = useState(() => (location.hash?.slice(1) || "discover"));
+  const [params, setParams] = useState({});
+  useEffect(() => {
+    const onHash = () => {
+      const hash = location.hash?.slice(1) || "discover";
+      const [r, q] = hash.split("?");
+      const query = Object.fromEntries(new URLSearchParams(q || ""));
+      setRoute(routes.includes(r) ? r : "discover");
+      setParams(query);
+    };
+    window.addEventListener("hashchange", onHash);
+    onHash();
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const go = (r, query) => {
+    const q = query ? `?${new URLSearchParams(query).toString()}` : "";
+    location.hash = `#${r}${q}`;
+  };
+  return { route, params, go };
+}
+
+// ---- UI Components ----
+const Shell = ({ children, onSearch, onLogout, user }) => (
+  <div className="min-h-screen bg-slate-50 text-slate-900">
+    <header className="sticky top-0 z-10 bg-white/80 backdrop-blur border-b border-slate-200">
+      <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-4">
+        <div className="flex items-center gap-2">
+          <span className="inline-block w-8 h-8 rounded-2xl bg-slate-900 text-white text-center leading-8 font-bold">P</span>
+          <span className="font-semibold">ParkSmart</span>
+          <span className="text-xs text-slate-500 ml-2">API: {API_BASE}</span>
+        </div>
+        <div className="flex-1" />
+        <input
+          type="search"
+          placeholder="Search locations, areas…"
+          className="w-64 md:w-96 border border-slate-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-slate-400"
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && onSearch) onSearch(e.currentTarget.value);
+          }}
+        />
+        {user ? (
+          <div className="flex items-center gap-3 ml-3">
+            <div className="text-sm text-slate-600">Hi, {user.name || user.email}</div>
+            <button className="px-3 py-1.5 rounded-lg border hover:bg-slate-100" onClick={onLogout}>Logout</button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 ml-3 text-sm">
+            <a href="#login" className="px-3 py-1.5 rounded-lg border hover:bg-slate-100">Login</a>
+            <a href="#register" className="px-3 py-1.5 rounded-lg border hover:bg-slate-100">Sign up</a>
+          </div>
+        )}
+      </div>
+    </header>
+    <main className="max-w-6xl mx-auto p-4">{children}</main>
+    <footer className="max-w-6xl mx-auto px-4 py-6 text-xs text-slate-500">© {new Date().getFullYear()} ParkSmart – Quantum Cortex</footer>
+  </div>
+);
+
+const Card = ({ children, className = "" }) => (
+  <div className={`bg-white rounded-2xl border border-slate-200 shadow-sm p-4 ${className}`}>{children}</div>
+);
+
+// ---- Discover Lots ----
+const Discover = ({ onOpenLot, query }) => {
+  const [lots, setLots] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      setLoading(true); setError("");
+      try {
+        const data = await api("/lots" + (query ? `?q=${encodeURIComponent(query)}` : ""));
+        if (mounted) setLots(Array.isArray(data) ? data : data.results || []);
+      } catch (e) {
+        if (mounted) setError(e.message);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+    return () => (mounted = false);
+  }, [query]);
+
+  if (loading) return <div className="animate-pulse">Loading parking lots…</div>;
+  if (error) return <Card>Failed to load lots: <span className="text-red-600">{error}</span></Card>;
+  if (!lots.length) return <Card>No lots found.</Card>;
+
+  return (
+    <div className="grid md:grid-cols-2 gap-4">
+      {lots.map((lot) => (
+        <Card key={lot.id || lot._id}>
+          <div className="flex items-start gap-4">
+            <div className="w-24 h-24 bg-slate-100 rounded-xl flex items-center justify-center text-slate-400 text-xs">IMG</div>
+            <div className="flex-1">
+              <div className="flex items-start justify-between">
+                <div>
+                  <h3 className="font-semibold text-lg">{lot.name || lot.title || "Parking Lot"}</h3>
+                  <div className="text-sm text-slate-600">{lot.address || lot.location || lot.area}</div>
+                </div>
+                <div className="text-right">
+                  <div className="text-sm text-slate-600">Rate</div>
+                  <div className="font-semibold">₹{lot.ratePerHour ?? lot.pricePerHour ?? lot.rate ?? "—"}/hr</div>
+                </div>
+              </div>
+              <div className="mt-3 flex items-center gap-2 text-sm">
+                <span className="px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-100">{lot.totalSlots ?? lot.capacity ?? "?"} slots</span>
+                {lot.availableSlots != null && (
+                  <span className="px-2 py-1 rounded-lg bg-blue-50 text-blue-700 border border-blue-100">{lot.availableSlots} available</span>
+                )}
+                <button className="ml-auto px-3 py-1.5 rounded-lg bg-slate-900 text-white hover:opacity-90" onClick={() => onOpenLot(lot)}>View</button>
+              </div>
+            </div>
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+};
+
+// ---- Lot Detail & Slot Availability ----
+const LotDetail = ({ lotId, onBack, token }) => {
+  const [lot, setLot] = useState(null);
+  const [slots, setSlots] = useState([]);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      setLoading(true); setError("");
+      try {
+        const d = await api(`/lots/${lotId}`);
+        const s = await api(`/lots/${lotId}/slots`);
+        if (mounted) { setLot(d); setSlots(Array.isArray(s) ? s : s.results || []); }
+      } catch (e) { if (mounted) setError(e.message); }
+      finally { if (mounted) setLoading(false); }
+    })();
+    return () => (mounted = false);
+  }, [lotId]);
+
+  const book = async (slotId) => {
+    try {
+      const booking = await api("/bookings", { method: "POST", token, body: { lotId, slotId, from, to } });
+      alert("Booking created: " + (booking.id || booking._id || JSON.stringify(booking)));
+    } catch (e) { alert("Booking failed: " + e.message); }
+  };
+
+  if (loading) return <div className="animate-pulse">Loading lot…</div>;
+  if (error) return <Card>Error: <span className="text-red-600">{error}</span></Card>;
+  if (!lot) return <Card>Lot not found.</Card>;
+
+  return (
+    <div className="space-y-4">
+      <button className="text-slate-600 hover:underline" onClick={onBack}>← Back</button>
+      <Card>
+        <div className="flex items-start gap-4">
+          <div className="w-28 h-28 rounded-xl bg-slate-100" />
+          <div className="flex-1">
+            <h2 className="text-xl font-semibold">{lot.name || lot.title || "Parking Lot"}</h2>
+            <div className="text-sm text-slate-600">{lot.address || lot.location || lot.area}</div>
+            <div className="mt-2 text-sm">Rate: <span className="font-medium">₹{lot.ratePerHour ?? lot.pricePerHour ?? lot.rate ?? "—"}/hr</span></div>
+          </div>
+        </div>
+      </Card>
+
+      <Card>
+        <div className="grid md:grid-cols-3 gap-3">
+          <label className="text-sm">From <input type="datetime-local" className="mt-1 w-full border rounded-lg px-2 py-1" value={from} onChange={(e) => setFrom(e.target.value)} /></label>
+          <label className="text-sm">To <input type="datetime-local" className="mt-1 w-full border rounded-lg px-2 py-1" value={to} onChange={(e) => setTo(e.target.value)} /></label>
+          <div className="text-xs text-slate-500 self-end">Select a slot below to book</div>
+        </div>
+      </Card>
+
+      <div className="grid md:grid-cols-2 gap-3">
+        {slots.map((s) => (
+          <Card key={s.id || s._id} className="flex items-center justify-between">
+            <div>
+              <div className="font-medium">Slot {s.number ?? s.label ?? s.id}</div>
+              <div className={`text-xs ${s.available === false ? "text-red-600" : "text-emerald-700"}`}>
+                {s.available === false ? "Unavailable" : "Available"}
+              </div>
+            </div>
+            <button disabled={s.available === false} className="px-3 py-1.5 rounded-lg bg-slate-900 text-white disabled:opacity-40" onClick={() => book(s.id || s._id)}>
+              Book
+            </button>
+          </Card>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+// ---- My Bookings ----
+const MyBookings = ({ token }) => {
+  const [items, setItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      setLoading(true); setError("");
+      try {
+        const data = await api("/bookings/me", { token });
+        if (mounted) setItems(Array.isArray(data) ? data : data.results || []);
+      } catch (e) { if (mounted) setError(e.message); }
+      finally { if (mounted) setLoading(false); }
+    })();
+    return () => (mounted = false);
+  }, [token]);
+
+  if (!token) return <Card>Please log in to view your bookings.</Card>;
+  if (loading) return <div className="animate-pulse">Loading bookings…</div>;
+  if (error) return <Card>Error: <span className="text-red-600">{error}</span></Card>;
+
+  return (
+    <div className="space-y-3">
+      {items.map((b) => (
+        <Card key={b.id || b._id} className="flex items-center justify-between">
+          <div>
+            <div className="font-medium">{b.lot?.name || b.lotName || "Parking Lot"}</div>
+            <div className="text-xs text-slate-600">Slot {b.slot?.number ?? b.slotLabel ?? b.slotId} · {new Date(b.from || b.start || b.fromTime).toLocaleString()} → {new Date(b.to || b.end || b.toTime).toLocaleString()}</div>
+          </div>
+          <div className="text-right">
+            <div className="text-sm text-slate-600">Total</div>
+            <div className="font-semibold">₹{b.amount ?? b.total ?? b.price ?? "—"}</div>
+          </div>
+        </Card>
+      ))}
+      {!items.length && <Card>No bookings yet.</Card>}
+    </div>
+  );
+};
+
+// ---- Auth Screens ----
+const Login = ({ onLoggedIn, login }) => {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setErr("");
+    try { await login(email, password); onLoggedIn(); }
+    catch (e) { setErr(String(e.message || e)); }
+  };
+
+  return (
+    <Card className="max-w-sm mx-auto">
+      <h2 className="text-lg font-semibold mb-2">Welcome back</h2>
+      <form onSubmit={submit} className="space-y-3">
+        <input className="w-full border rounded-lg px-3 py-2" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <input type="password" className="w-full border rounded-lg px-3 py-2" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        {err && <div className="text-sm text-red-600">{err}</div>}
+        <button className="w-full px-3 py-2 rounded-lg bg-slate-900 text-white">Login</button>
+      </form>
+      <div className="text-xs text-slate-600 mt-3">No account? <a className="underline" href="#register">Create one</a></div>
+    </Card>
+  );
+};
+
+const Register = ({ onRegistered, register }) => {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState("");
+  const [ok, setOk] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setErr(""); setOk(false);
+    try { await register(name, email, password); setOk(true); setTimeout(onRegistered, 800); }
+    catch (e) { setErr(String(e.message || e)); }
+  };
+
+  return (
+    <Card className="max-w-sm mx-auto">
+      <h2 className="text-lg font-semibold mb-2">Create your account</h2>
+      <form onSubmit={submit} className="space-y-3">
+        <input className="w-full border rounded-lg px-3 py-2" placeholder="Full name" value={name} onChange={(e) => setName(e.target.value)} />
+        <input className="w-full border rounded-lg px-3 py-2" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} />
+        <input type="password" className="w-full border rounded-lg px-3 py-2" placeholder="Password" value={password} onChange={(e) => setPassword(e.target.value)} />
+        {err && <div className="text-sm text-red-600">{err}</div>}
+        {ok && <div className="text-sm text-emerald-700">Registration successful. Redirecting…</div>}
+        <button className="w-full px-3 py-2 rounded-lg bg-slate-900 text-white">Sign up</button>
+      </form>
+    </Card>
+  );
+};
+
+// ---- Admin (Lot Manager) – minimal stub ----
+const Admin = ({ token }) => {
+  const [lots, setLots] = useState([]);
+  const [name, setName] = useState("");
+  const [address, setAddress] = useState("");
+  const [rate, setRate] = useState("");
+  const [message, setMessage] = useState("");
+
+  const load = async () => {
+    try {
+      const d = await api("/lots", { token });
+      setLots(Array.isArray(d) ? d : d.results || []);
+    } catch (e) { setMessage(e.message); }
+  };
+  useEffect(() => { load(); }, []);
+
+  const create = async (e) => {
+    e.preventDefault(); setMessage("");
+    try {
+      const payload = { name, address, ratePerHour: Number(rate) };
+      await api("/lots", { method: "POST", token, body: payload });
+      setName(""); setAddress(""); setRate("");
+      await load(); setMessage("Lot created");
+    } catch (e) { setMessage(e.message); }
+  };
+
+  if (!token) return <Card>Login required.</Card>;
+  return (
+    <div className="grid md:grid-cols-2 gap-4">
+      <Card>
+        <h3 className="font-semibold mb-2">Create Parking Lot</h3>
+        <form className="space-y-2" onSubmit={create}>
+          <input className="w-full border rounded-lg px-3 py-2" placeholder="Lot name" value={name} onChange={(e) => setName(e.target.value)} />
+          <input className="w-full border rounded-lg px-3 py-2" placeholder="Address / Area" value={address} onChange={(e) => setAddress(e.target.value)} />
+          <input className="w-full border rounded-lg px-3 py-2" placeholder="Rate per hour (₹)" value={rate} onChange={(e) => setRate(e.target.value)} />
+          <button className="px-3 py-2 rounded-lg bg-slate-900 text-white">Create</button>
+          {message && <div className="text-xs text-slate-600">{message}</div>}
+        </form>
+      </Card>
+
+      <Card>
+        <h3 className="font-semibold mb-2">Your Lots</h3>
+        <div className="space-y-2 max-h-[22rem] overflow-auto pr-2">
+          {lots.map((lot) => (
+            <div key={lot.id || lot._id} className="flex items-center justify-between border rounded-xl px-3 py-2">
+              <div>
+                <div className="font-medium">{lot.name}</div>
+                <div className="text-xs text-slate-600">₹{lot.ratePerHour ?? lot.rate}/hr · {lot.address}</div>
+              </div>
+              <button className="text-red-600 text-sm" onClick={async () => {
+                try { await api(`/lots/${lot.id || lot._id}`, { method: "DELETE", token }); await load(); }
+                catch (e) { alert(e.message); }
+              }}>Delete</button>
+            </div>
+          ))}
+          {!lots.length && <div className="text-sm text-slate-500">No lots yet.</div>}
+        </div>
+      </Card>
+    </div>
+  );
+};
+
+// ---- Root App ----
+export default function App() {
+  const { route, params, go } = useRoute();
+  const auth = useAuth();
+  const [search, setSearch] = useState("");
+  const [selectedLot, setSelectedLot] = useState(null);
+
+  const openLot = (lot) => { setSelectedLot(lot); go("lot", { id: lot.id || lot._id }); };
+  useEffect(() => {
+    if (route === "lot" && params.id && (!selectedLot || (selectedLot.id || selectedLot._id) !== params.id)) {
+      // best-effort fetch of lot meta if opened via hash
+      (async () => {
+        try { const d = await api(`/lots/${params.id}`); setSelectedLot(d); } catch {}
+      })();
+    }
+  }, [route, params.id]);
+
+  return (
+    <Shell onLogout={auth.logout} onSearch={setSearch} user={auth.user}>
+      <div className="mb-4 flex gap-2 text-sm">
+        <a href="#discover" className={`px-3 py-1.5 rounded-lg border ${route === "discover" ? "bg-slate-900 text-white" : "hover:bg-slate-100"}`}>Discover</a>
+        <a href="#bookings" className={`px-3 py-1.5 rounded-lg border ${route === "bookings" ? "bg-slate-900 text-white" : "hover:bg-slate-100"}`}>My Bookings</a>
+        <a href="#admin" className={`px-3 py-1.5 rounded-lg border ${route === "admin" ? "bg-slate-900 text-white" : "hover:bg-slate-100"}`}>Admin</a>
+      </div>
+
+      {route === "discover" && (
+        <Discover onOpenLot={openLot} query={search} />
+      )}
+
+      {route === "lot" && (
+        selectedLot ? (
+          <LotDetail lotId={selectedLot.id || selectedLot._id || params.id} onBack={() => history.back()} token={auth.token} />
+        ) : (
+          <Card>Loading lot…</Card>
+        )
+      )}
+
+      {route === "bookings" && (
+        <MyBookings token={auth.token} />
+      )}
+
+      {route === "login" && (
+        <Login onLoggedIn={() => (location.hash = "#discover")} login={auth.login} />
+      )}
+
+      {route === "register" && (
+        <Register onRegistered={() => (location.hash = "#login")} register={auth.register} />
+      )}
+
+      {route === "admin" && (
+        <Admin token={auth.token} />
+      )}
+
+      <div className="mt-10 text-xs text-slate-500">
+        Tip: set <code>VITE_API_BASE</code> in your env to point at the backend. This UI auto-adapts to slightly different field names.
+      </div>
+    </Shell>
+  );
+}
